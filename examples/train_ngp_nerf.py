@@ -166,6 +166,7 @@ for step in range(max_steps + 1):
     render_bkgd = data["color_bkgd"]
     rays = data["rays"]
     pixels = data["pixels"]
+    depth_gt = data["depth"]
 
     def occ_eval_fn(x):
         density = radiance_field.query_density(x)
