@@ -30,24 +30,30 @@ def _load_renderings(root_fp: str, subject_id: str, split: str):
         os.path.join(data_dir, "transforms_{}.json".format(split)), "r"
     ) as fp:
         meta = json.load(fp)
-    images = []
+    images, depths = [], []
     camtoworlds = []
 
     for i in range(len(meta["frames"])):
         frame = meta["frames"][i]
         fname = os.path.join(data_dir, frame["file_path"] + ".png")
+        depth_name = os.path.join(data_dir, frame["file_path"] + "_depth_0212.png")
+        if not os.path.exists(fname):
+            continue
         rgba = imageio.imread(fname)
+        depth = imageio.imread(depth_name)[:, :, 0]
         camtoworlds.append(frame["transform_matrix"])
         images.append(rgba)
+        depths.append(depth)
 
     images = np.stack(images, axis=0)
+    depths = np.stack(depths, axis=0)
     camtoworlds = np.stack(camtoworlds, axis=0)
 
     h, w = images.shape[1:3]
     camera_angle_x = float(meta["camera_angle_x"])
     focal = 0.5 * w / np.tan(0.5 * camera_angle_x)
 
-    return images, camtoworlds, focal
+    return images, depths, camtoworlds, focal
 
 
 class SubjectLoader(torch.utils.data.Dataset):
@@ -107,10 +113,11 @@ class SubjectLoader(torch.utils.data.Dataset):
             )
             self.focal = _focal_train
         else:
-            self.images, self.camtoworlds, self.focal = _load_renderings(
+            self.images, self.depths, self.camtoworlds, self.focal = _load_renderings(
                 root_fp, subject_id, split
             )
         self.images = torch.from_numpy(self.images).to(torch.uint8)
+        self.depths = torch.from_numpy(self.depths).to(torch.uint8)
         self.camtoworlds = torch.from_numpy(self.camtoworlds).to(torch.float32)
         self.K = torch.tensor(
             [
@@ -121,6 +128,7 @@ class SubjectLoader(torch.utils.data.Dataset):
             dtype=torch.float32,
         )  # (3, 3)
         self.images = self.images.to(device)
+        self.depths = self.depths.to(device)
         self.camtoworlds = self.camtoworlds.to(device)
         self.K = self.K.to(device)
         assert self.images.shape[1:3] == (self.HEIGHT, self.WIDTH)
@@ -136,7 +144,7 @@ class SubjectLoader(torch.utils.data.Dataset):
 
     def preprocess(self, data):
         """Process the fetched / cached data with randomness."""
-        rgba, rays = data["rgba"], data["rays"]
+        rgba, rays, depth = data["rgba"], data["rays"], data["depth"]
         pixels, alpha = torch.split(rgba, [3, 1], dim=-1)
 
         if self.training:
@@ -153,6 +161,7 @@ class SubjectLoader(torch.utils.data.Dataset):
         pixels = pixels * alpha + color_bkgd * (1.0 - alpha)
         return {
             "pixels": pixels,  # [n_rays, 3] or [h, w, 3]
+            "depth": depth,  # [n_rays, 1] or [h, w, 1]
             "rays": rays,  # [n_rays,] or [h, w]
             "color_bkgd": color_bkgd,  # [3,]
             **{k: v for k, v in data.items() if k not in ["rgba", "rays"]},
@@ -193,6 +202,7 @@ class SubjectLoader(torch.utils.data.Dataset):
 
         # generate rays
         rgba = self.images[image_id, y, x] / 255.0  # (num_rays, 4)
+        depth = self.depths[image_id, y, x] / 255.0
         c2w = self.camtoworlds[image_id]  # (num_rays, 3, 4)
         camera_dirs = F.pad(
             torch.stack(
@@ -214,19 +224,24 @@ class SubjectLoader(torch.utils.data.Dataset):
         viewdirs = directions / torch.linalg.norm(
             directions, dim=-1, keepdims=True
         )
+        depth_coeff = torch.sum(viewdirs * camera_dirs, dim=1)
 
         if self.training:
             origins = torch.reshape(origins, (num_rays, 3))
             viewdirs = torch.reshape(viewdirs, (num_rays, 3))
             rgba = torch.reshape(rgba, (num_rays, 4))
+            depth = torch.reshape(depth, (num_rays, 1))
         else:
             origins = torch.reshape(origins, (self.HEIGHT, self.WIDTH, 3))
             viewdirs = torch.reshape(viewdirs, (self.HEIGHT, self.WIDTH, 3))
             rgba = torch.reshape(rgba, (self.HEIGHT, self.WIDTH, 4))
+            depth = torch.reshape(depth, (self.HEIGHT, self.WIDTH, 1))
 
         rays = Rays(origins=origins, viewdirs=viewdirs)
 
         return {
-            "rgba": rgba,  # [h, w, 4] or [num_rays, 4]
-            "rays": rays,  # [h, w, 3] or [num_rays, 3]
+            "rgba": rgba,   # [h, w, 4] or [num_rays, 4]
+            "rays": rays,   # [h, w, 3] or [num_rays, 3]
+            "depth": depth,  # [h, w, 1] or [num_rays, 1]
+            "depth_coeff": depth_coeff
         }
