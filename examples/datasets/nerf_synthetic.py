@@ -33,11 +33,15 @@ def _load_renderings(root_fp: str, subject_id: str, split: str):
     images, depths = [], []
     camtoworlds = []
 
+    if split == "test":
+        skip = 1
+    else:
+        skip = 10
     for i in range(len(meta["frames"])):
         frame = meta["frames"][i]
         fname = os.path.join(data_dir, frame["file_path"] + ".png")
         depth_name = os.path.join(data_dir, frame["file_path"] + "_depth_0212.png")
-        if not os.path.exists(fname):
+        if not os.path.exists(fname) or i % skip != 0:
             continue
         rgba = imageio.imread(fname)
         depth = imageio.imread(depth_name)[:, :, 0]
