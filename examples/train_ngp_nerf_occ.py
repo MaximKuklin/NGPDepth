@@ -82,7 +82,7 @@ else:
     from datasets.nerf_synthetic import SubjectLoader
 
     # training parameters
-    max_steps = 20000
+    max_steps = 5000
     init_batch_size = 1024
     target_sample_batch_size = 1 << 18
     weight_decay = (
@@ -136,15 +136,15 @@ scheduler = torch.optim.lr_scheduler.ChainedScheduler(
         torch.optim.lr_scheduler.LinearLR(
             optimizer, start_factor=0.01, total_iters=100
         ),
-        torch.optim.lr_scheduler.MultiStepLR(
-            optimizer,
-            milestones=[
-                max_steps // 2,
-                max_steps * 3 // 4,
-                max_steps * 9 // 10,
-            ],
-            gamma=0.33,
-        ),
+        # torch.optim.lr_scheduler.MultiStepLR(
+        #     optimizer,
+        #     milestones=[
+        #         max_steps // 2,
+        #         max_steps * 3 // 4,
+        #         max_steps * 9 // 10,
+        #     ],
+        #     gamma=0.33,
+        # ),
     ]
 )
 lpips_net = LPIPS(net="vgg").to(device)
@@ -164,6 +164,10 @@ for step in range(max_steps + 1):
     rays = data["rays"]
     pixels = data["pixels"]
     depth_gt = data["depth"]
+
+    from_min, from_max, to_min, to_max = 0, 8, 1, 0  # params from blender
+    depth_gt = (depth_gt - to_max) * (from_max - from_min) / (to_min - to_max) + from_min
+    depth_gt[depth_gt > 0] = 8 - depth_gt[depth_gt > 0]
 
     def occ_eval_fn(x):
         density = radiance_field.query_density(x)
@@ -200,7 +204,10 @@ for step in range(max_steps + 1):
         train_dataset.update_num_rays(num_rays)
 
     # compute loss
-    loss = F.smooth_l1_loss(rgb, pixels)
+    rgb_loss = F.smooth_l1_loss(rgb, pixels)
+
+    depth_loss = F.smooth_l1_loss(depth, depth_gt) * 0.005
+    loss = rgb_loss + depth_loss
 
     optimizer.zero_grad()
     # do not unscale it because we are using Adam.
@@ -208,7 +215,7 @@ for step in range(max_steps + 1):
     optimizer.step()
     scheduler.step()
 
-    if step % 10000 == 0:
+    if step % 1000 == 0:
         elapsed_time = time.time() - tic
         loss = F.mse_loss(rgb, pixels)
         psnr = -10.0 * torch.log(loss) / np.log(10.0)
