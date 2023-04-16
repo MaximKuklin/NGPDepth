@@ -262,17 +262,16 @@ for step in range(max_steps + 1):
                 psnr = -10.0 * torch.log(mse) / np.log(10.0)
                 psnrs.append(psnr.item())
                 lpips.append(lpips_fn(rgb, pixels).item())
-                # if i == 0:
-                #     imageio.imwrite(
-                #         "rgb_test.png",
-                #         (rgb.cpu().numpy() * 255).astype(np.uint8),
-                #     )
-                #     imageio.imwrite(
-                #         "rgb_error.png",
-                #         (
-                #             (rgb - pixels).norm(dim=-1).cpu().numpy() * 255
-                #         ).astype(np.uint8),
-                #     )
+                imageio.imwrite(
+                    f"results/rgb_test_{i}.png",
+                    (rgb.cpu().numpy() * 255).astype(np.uint8),
+                )
+                imageio.imwrite(
+                    f"results/rgb_error_{i}.png",
+                    (
+                        (rgb - pixels).norm(dim=-1).cpu().numpy() * 255
+                    ).astype(np.uint8),
+                )
         psnr_avg = sum(psnrs) / len(psnrs)
         lpips_avg = sum(lpips) / len(lpips)
         print(f"evaluation: psnr_avg={psnr_avg}, lpips_avg={lpips_avg}")
