@@ -206,7 +206,7 @@ for step in range(max_steps + 1):
     # compute loss
     rgb_loss = F.smooth_l1_loss(rgb, pixels)
 
-    depth_loss = F.smooth_l1_loss(depth, depth_gt) * 0.005
+    depth_loss = F.mse_loss(depth, depth_gt) * 0.01
     loss = rgb_loss + depth_loss
 
     optimizer.zero_grad()
