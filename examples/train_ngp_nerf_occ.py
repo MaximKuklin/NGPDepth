@@ -164,6 +164,7 @@ for step in range(max_steps + 1):
     rays = data["rays"]
     pixels = data["pixels"]
     depth_gt = data["depth"]
+    depth_coeff = data["depth_coeff"]
 
     from_min, from_max, to_min, to_max = 0, 8, 1, 0  # params from blender
     depth_gt = (depth_gt - to_max) * (from_max - from_min) / (to_min - to_max) + from_min
@@ -205,8 +206,11 @@ for step in range(max_steps + 1):
 
     # compute loss
     rgb_loss = F.smooth_l1_loss(rgb, pixels)
+    depth_loss = F.smooth_l1_loss(depth
+                            * depth_coeff
+                            , depth_gt, reduction='none')
+    depth_loss = depth_loss.mean() * 0.1
 
-    depth_loss = F.mse_loss(depth, depth_gt) * 0.01
     loss = rgb_loss + depth_loss
 
     optimizer.zero_grad()

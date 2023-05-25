@@ -28,6 +28,10 @@ NERF_SYNTHETIC_SCENES = [
     "materials",
     "mic",
     "ship",
+    "lego_hard_to_reach",
+    "lego_9",
+    "lego_6",
+    "lego_3"
 ]
 MIPNERF360_UNBOUNDED_SCENES = [
     "garden",
@@ -62,6 +66,7 @@ def render_image_with_occgrid(
     test_chunk_size: int = 8192,
     # only useful for dnerf
     timestamps: Optional[torch.Tensor] = None,
+    depth_gt: Optional[torch.Tensor] = None,
 ):
     """Render the pixels of an image."""
     rays_shape = rays.origins.shape

@@ -141,7 +141,7 @@ def rendering(
         ray_indices=ray_indices,
         n_rays=n_rays,
     )
-    depths = depths / opacities.clamp_min(torch.finfo(rgbs.dtype).eps)
+    # depths = depths / opacities.clamp_min(torch.finfo(rgbs.dtype).eps)
 
     # Background composition.
     if render_bkgd is not None:

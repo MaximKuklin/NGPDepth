@@ -14,6 +14,15 @@ import torch.nn.functional as F
 from .utils import Rays
 
 
+def get_postfix(path):
+    files = os.listdir(path)
+    for file in files:
+        if "depth" in file:
+            postfix = file.rsplit(".", maxsplit=1)[0].rsplit("_", maxsplit=1)[-1]
+            return postfix
+    return None
+
+
 def _load_renderings(root_fp: str, subject_id: str, split: str):
     """Load images from disk."""
     if not root_fp.startswith("/"):
@@ -35,12 +44,14 @@ def _load_renderings(root_fp: str, subject_id: str, split: str):
 
     if split == "test":
         skip = 1
+        postfix = get_postfix(os.path.join(data_dir, split))
     else:
-        skip = 10
+        skip = 1
+        postfix = get_postfix(os.path.join(data_dir, split))
     for i in range(len(meta["frames"])):
         frame = meta["frames"][i]
         fname = os.path.join(data_dir, frame["file_path"] + ".png")
-        depth_name = os.path.join(data_dir, frame["file_path"] + "_depth_0212.png")
+        depth_name = os.path.join(data_dir, frame["file_path"] + f"_depth_{postfix}.png")
         if not os.path.exists(fname) or i % skip != 0:
             continue
         rgba = imageio.imread(fname)
@@ -73,6 +84,10 @@ class SubjectLoader(torch.utils.data.Dataset):
         "materials",
         "mic",
         "ship",
+        "lego_hard_to_reach",
+        "lego_9",
+        "lego_6",
+        "lego_3"
     ]
 
     WIDTH, HEIGHT = 800, 800
@@ -222,17 +237,33 @@ class SubjectLoader(torch.utils.data.Dataset):
             value=(-1.0 if self.OPENGL_CAMERA else 1.0),
         )  # [num_rays, 3]
 
+        cam_forward = F.pad(
+            torch.stack(
+                [
+                    (self.WIDTH / 2 - self.K[0, 2]) / self.K[0, 0],
+                    (self.HEIGHT / 2 - self.K[1, 2]) / self.K[1, 1]
+                    * (-1.0 if self.OPENGL_CAMERA else 1.0),
+                ],
+                dim=-1,
+            ),
+            (0, 1),
+            value=(-1.0 if self.OPENGL_CAMERA else 1.0),
+        )[None]  # [num_rays, 3]
+
         # [n_cams, height, width, 3]
         directions = (camera_dirs[:, None, :] * c2w[:, :3, :3]).sum(dim=-1)
+        cam_forward = (cam_forward[:, None, :] * c2w[:, :3, :3]).sum(dim=-1)
         origins = torch.broadcast_to(c2w[:, :3, -1], directions.shape)
         viewdirs = directions / torch.linalg.norm(
             directions, dim=-1, keepdims=True
         )
-        depth_coeff = torch.sum(viewdirs * camera_dirs, dim=1)
+        # depth_coeff = torch.sum(viewdirs * camera_dirs, dim=1)
+        depth_coeff = torch.sum(viewdirs * cam_forward, dim=-1)
 
         if self.training:
             origins = torch.reshape(origins, (num_rays, 3))
             viewdirs = torch.reshape(viewdirs, (num_rays, 3))
+            depth_coeff = torch.reshape(depth_coeff, (num_rays, 1))
             rgba = torch.reshape(rgba, (num_rays, 4))
             depth = torch.reshape(depth, (num_rays, 1))
         else:
@@ -247,5 +278,5 @@ class SubjectLoader(torch.utils.data.Dataset):
             "rgba": rgba,   # [h, w, 4] or [num_rays, 4]
             "rays": rays,   # [h, w, 3] or [num_rays, 3]
             "depth": depth,  # [h, w, 1] or [num_rays, 1]
-            "depth_coeff": depth_coeff
+            "depth_coeff": depth_coeff,
         }
