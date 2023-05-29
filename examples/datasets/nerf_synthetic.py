@@ -271,6 +271,7 @@ class SubjectLoader(torch.utils.data.Dataset):
             viewdirs = torch.reshape(viewdirs, (self.HEIGHT, self.WIDTH, 3))
             rgba = torch.reshape(rgba, (self.HEIGHT, self.WIDTH, 4))
             depth = torch.reshape(depth, (self.HEIGHT, self.WIDTH, 1))
+            depth_coeff = torch.reshape(depth_coeff, (self.HEIGHT, self.WIDTH, 1))
 
         rays = Rays(origins=origins, viewdirs=viewdirs)
 

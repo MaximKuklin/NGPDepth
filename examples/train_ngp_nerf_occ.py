@@ -4,8 +4,10 @@ Copyright (c) 2022 Ruilong Li, UC Berkeley.
 
 import argparse
 import math
+import os
 import pathlib
 import time
+import warnings
 
 import imageio
 import numpy as np
@@ -22,6 +24,9 @@ from examples.utils import (
     set_random_seed,
 )
 from nerfacc.estimators.occ_grid import OccGridEstimator
+
+warnings.filterwarnings("ignore")
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -42,8 +47,59 @@ parser.add_argument(
     "--scene",
     type=str,
     default="lego",
-    choices=NERF_SYNTHETIC_SCENES + MIPNERF360_UNBOUNDED_SCENES,
+    # choices=NERF_SYNTHETIC_SCENES + MIPNERF360_UNBOUNDED_SCENES,
     help="which scene to use",
+)
+parser.add_argument(
+    "--use_depth",
+    action="store_true",
+    help="Add depth_loss"
+)
+parser.add_argument(
+    "--use_rgb_reg",
+    action="store_true",
+    help="Use rgb regularization loss"
+)
+parser.add_argument(
+    "--depth_loss_weight",
+    default=0.01,
+    help="Depth loss weight",
+    type=float
+)
+parser.add_argument(
+    "--save_folder",
+    help="Folder to save eval images",
+    type=str
+)
+parser.add_argument(
+    "--num_iters",
+    "-it",
+    type=int,
+    default=5000,
+    help="Maximum num of training iterations"
+)
+parser.add_argument(
+    "--grid",
+    type=str,
+    help="path to grid if so"
+)
+parser.add_argument(
+    "--lr",
+    type=float,
+    default=0.01,
+    help="learning rate"
+)
+parser.add_argument(
+    "--bg_color",
+    type=str,
+    choices=["green", "black", "white", "random"],
+    default="white",
+    help="background color"
+)
+parser.add_argument(
+    "--iter_depth_div",
+    type=int,
+    default=-1
 )
 parser.add_argument(
     "--test_chunk_size",
@@ -59,7 +115,7 @@ if args.scene in MIPNERF360_UNBOUNDED_SCENES:
     from datasets.nerf_360_v2 import SubjectLoader
 
     # training parameters
-    max_steps = 20000
+    max_steps = args.num_iters
     init_batch_size = 1024
     target_sample_batch_size = 1 << 18
     weight_decay = 0.0
@@ -82,19 +138,19 @@ else:
     from datasets.nerf_synthetic import SubjectLoader
 
     # training parameters
-    max_steps = 5000
+    max_steps = args.num_iters
     init_batch_size = 1024
     target_sample_batch_size = 1 << 18
     weight_decay = (
-        1e-5 if args.scene in ["materials", "ficus", "drums"] else 1e-6
+        1e-5 if args.scene.startswith(("materials", "ficus", "drums")) else 1e-6
     )
     # scene parameters
     aabb = torch.tensor([-1.5, -1.5, -1.5, 1.5, 1.5, 1.5], device=device)
     near_plane = 0.0
     far_plane = 1.0e10
     # dataset parameters
-    train_dataset_kwargs = {}
-    test_dataset_kwargs = {}
+    train_dataset_kwargs = {"color_bkgd_aug": f"{args.bg_color}"}
+    test_dataset_kwargs = {} #{"color_bkgd_aug": f"{args.bg_color}"}
     # model parameters
     grid_resolution = 128
     grid_nlvl = 1
@@ -129,7 +185,7 @@ estimator = OccGridEstimator(
 grad_scaler = torch.cuda.amp.GradScaler(2**10)
 radiance_field = NGPRadianceField(aabb=estimator.aabbs[-1]).to(device)
 optimizer = torch.optim.Adam(
-    radiance_field.parameters(), lr=1e-2, eps=1e-15, weight_decay=weight_decay
+    radiance_field.parameters(), lr=args.lr, eps=1e-15, weight_decay=weight_decay
 )
 scheduler = torch.optim.lr_scheduler.ChainedScheduler(
     [
@@ -175,11 +231,13 @@ for step in range(max_steps + 1):
         return density * render_step_size
 
     # update occupancy grid
-    estimator.update_every_n_steps(
-        step=step,
-        occ_eval_fn=occ_eval_fn,
-        occ_thre=1e-2,
-    )
+    if args.grid is None:
+        estimator.update_every_n_steps(
+            step=step,
+            occ_eval_fn=occ_eval_fn,
+            occ_thre=1 if args.grid is not None else 1e-2,
+            warmup_steps=0,
+        )
 
     # render
     rgb, acc, depth, n_rendering_samples = render_image_with_occgrid(
@@ -204,14 +262,26 @@ for step in range(max_steps + 1):
         )
         train_dataset.update_num_rays(num_rays)
 
-    # compute loss
-    rgb_loss = F.smooth_l1_loss(rgb, pixels)
-    depth_loss = F.smooth_l1_loss(depth
-                            * depth_coeff
-                            , depth_gt, reduction='none')
-    depth_loss = depth_loss.mean() * 0.1
+    if args.iter_depth_div == -1:
+        rgb_loss = F.smooth_l1_loss(rgb, pixels, reduction="none")
+        loss = rgb_loss.mean()
 
-    loss = rgb_loss + depth_loss
+        if args.use_depth:
+            depth_loss = F.smooth_l1_loss(
+                depth * depth_coeff,
+                depth_gt,
+                reduction='none'
+            )
+            if args.use_rgb_reg:
+                rgb_regularization = rgb_loss.sum(dim=1, keepdim=True) / 3
+                depth_loss = depth_loss * rgb_regularization
+
+            loss += depth_loss.mean() * args.depth_loss_weight
+    else:
+        if step > max_steps // args.iter_depth_div:
+            loss = F.smooth_l1_loss(rgb, pixels)
+        else:
+            loss = F.smooth_l1_loss(depth * depth_coeff, depth_gt) * args.depth_loss_weight
 
     optimizer.zero_grad()
     # do not unscale it because we are using Adam.
@@ -235,7 +305,10 @@ for step in range(max_steps + 1):
         radiance_field.eval()
         estimator.eval()
 
+        if args.save_folder is not None:
+            os.makedirs(args.save_folder, exist_ok=True)
         psnrs = []
+        rmses = []
         lpips = []
         with torch.no_grad():
             for i in tqdm.tqdm(range(len(test_dataset))):
@@ -243,6 +316,12 @@ for step in range(max_steps + 1):
                 render_bkgd = data["color_bkgd"]
                 rays = data["rays"]
                 pixels = data["pixels"]
+                depth_gt = data["depth"]
+                depth_coeff = data["depth_coeff"]
+
+                from_min, from_max, to_min, to_max = 0, 8, 1, 0  # params from blender
+                depth_gt = (depth_gt - to_max) * (from_max - from_min) / (to_min - to_max) + from_min
+                depth_gt[depth_gt > 0] = 8 - depth_gt[depth_gt > 0]
 
                 # rendering
                 rgb, acc, depth, _ = render_image_with_occgrid(
@@ -260,18 +339,28 @@ for step in range(max_steps + 1):
                 )
                 mse = F.mse_loss(rgb, pixels)
                 psnr = -10.0 * torch.log(mse) / np.log(10.0)
+                rmse_depth = torch.sqrt(
+                    F.mse_loss((depth * depth_coeff)[depth_mask], depth_gt[depth_mask])
+                )
                 psnrs.append(psnr.item())
-                lpips.append(lpips_fn(rgb, pixels).item())
-                # imageio.imwrite(
-                #     f"results/rgb_test_{i}.png",
-                #     (rgb.cpu().numpy() * 255).astype(np.uint8),
-                # )
-                # imageio.imwrite(
-                #     f"results/rgb_error_{i}.png",
-                #     (
-                #         (rgb - pixels).norm(dim=-1).cpu().numpy() * 255
-                #     ).astype(np.uint8),
-                # )
+                rmses.append(rmse_depth.item())
+                # lpips.append(lpips_fn(rgb, pixels).item())
+                if args.save_folder is not None:
+                    imageio.imwrite(
+                        os.path.join(args.save_folder, f"rgb_test_{i}.png"),
+                        (rgb.cpu().numpy() * 255).astype(np.uint8),
+                    )
+                    # imageio.imwrite(
+                    #     os.path.join(args.save_folder, f"rgb_error_{i}.png"),
+                    #     (
+                    #         (rgb - pixels).norm(dim=-1).cpu().numpy() * 255
+                    #     ).astype(np.uint8),
+                    # )
         psnr_avg = sum(psnrs) / len(psnrs)
-        lpips_avg = sum(lpips) / len(lpips)
-        print(f"evaluation: psnr_avg={psnr_avg}, lpips_avg={lpips_avg}")
+        rmse_avg = sum(rmses) / len(rmses)
+        # lpips_avg = sum(lpips) / len(lpips)
+        print(f"evaluation: psnr_avg={psnr_avg} | ",
+              f"rmse_depth={rmse_avg} | "
+              # f"lpips_avg={lpips_avg}"
+              )
+        print(f"{psnr_avg:.4f},{rmse_avg:.4f},{elapsed_time:.2f}")
